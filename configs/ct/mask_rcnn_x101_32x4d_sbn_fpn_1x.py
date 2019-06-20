@@ -1,4 +1,5 @@
 # model settings
+norm_cfg = dict(type='BN', requires_grad=False)
 model = dict(
     type='MaskRCNN',
     pretrained='open-mmlab://resnext101_32x4d',
@@ -11,7 +12,7 @@ model = dict(
         out_indices=(0, 1, 2, 3),
         frozen_stages=1,
         style='pytorch',
-        normalize=dict(type='SyncBN', frozen=False),
+        # normalize=dict(type='SyncBN', frozen=False),
         norm_eval=False,
     ),
     neck=dict(
