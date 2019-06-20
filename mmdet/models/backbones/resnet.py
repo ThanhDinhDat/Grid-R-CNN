@@ -7,7 +7,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from mmcv.cnn import constant_init, kaiming_init
 from mmcv.runner import load_checkpoint
 
-from mmdet.ops import DeformConv, ModulatedDeformConv
+from mmdet.ops import DeformConv, ModulatedDeformConv, ContextBlock2d
 from ..registry import BACKBONES
 from ..utils import build_conv_layer, build_norm_layer
 
@@ -25,10 +25,11 @@ class BasicBlock(nn.Module):
                  with_cp=False,
                  conv_cfg=None,
                  norm_cfg=dict(type='BN'),
-                 dcn=None):
+                 dcn=None,
+                 ct=None):
         super(BasicBlock, self).__init__()
         assert dcn is None, "Not implemented yet."
-
+        assert ct is None, "Not implemented yet"
         self.norm1_name, norm1 = build_norm_layer(norm_cfg, planes, postfix=1)
         self.norm2_name, norm2 = build_norm_layer(norm_cfg, planes, postfix=2)
 
@@ -92,7 +93,8 @@ class Bottleneck(nn.Module):
                  with_cp=False,
                  conv_cfg=None,
                  norm_cfg=dict(type='BN'),
-                 dcn=None):
+                 dcn=None,
+                 ct=None):
         """Bottleneck block for ResNet.
         If style is "pytorch", the stride-two layer is the 3x3 conv layer,
         if it is "caffe", the stride-two layer is the first 1x1 conv layer.
@@ -110,6 +112,8 @@ class Bottleneck(nn.Module):
         self.norm_cfg = norm_cfg
         self.dcn = dcn
         self.with_dcn = dcn is not None
+        self.ct = ct
+        self.with_ct = ct is not None
         if self.style == 'pytorch':
             self.conv1_stride = 1
             self.conv2_stride = stride
@@ -171,6 +175,27 @@ class Bottleneck(nn.Module):
                 deformable_groups=deformable_groups,
                 bias=False)
         self.add_module(self.norm2_name, norm2)
+        if self.with_ct:
+            self.insert_pos = ct.get('insert_pos', 'after_1x1')
+            assert self.insert_pos in ['after_1x1', 'after_3x3', 'after_add']
+            if self.insert_pos == 'after_3x3':
+                ct_inplanes = planes
+            else:
+                ct_inplanes = planes * self.expansion
+            ct_ratio = ct.get('ratio', None)
+            if ct_ratio is not None:
+                ct_planes = int(ct_inplanes * ct_ratio)
+            else:
+                ct_planes = None
+            pool = ct.get('pool', 'att')
+            fusions = ct.get('fusions', 'channel_add')
+            fusions = fusions if isinstance(fusions, list) else [fusions]
+            self.context_block = ContextBlock2d(
+                inplanes=ct_inplanes,
+                planes=ct_planes,
+                pool=pool,
+                fusions=fusions,
+            )
         self.conv3 = build_conv_layer(
             conv_cfg,
             planes,
@@ -215,15 +240,19 @@ class Bottleneck(nn.Module):
                 out = self.conv2(out, offset)
             out = self.norm2(out)
             out = self.relu(out)
-
+            if self.with_ct and self.insert_pos == 'after_3x3':
+                out = self.context_block(out)
             out = self.conv3(out)
             out = self.norm3(out)
+            if self.with_ct and self.insert_pos == 'after_1x1':
+                out = self.context_block(out)
 
             if self.downsample is not None:
                 identity = self.downsample(x)
 
             out += identity
-
+            if self.with_ct and self.insert_pos == 'after_add':
+                out = self.context_block(out)
             return out
 
         if self.with_cp and x.requires_grad:
@@ -246,7 +275,8 @@ def make_res_layer(block,
                    with_cp=False,
                    conv_cfg=None,
                    norm_cfg=dict(type='BN'),
-                   dcn=None):
+                   dcn=None,
+                   ct=None):
     downsample = None
     if stride != 1 or inplanes != planes * block.expansion:
         downsample = nn.Sequential(
@@ -272,7 +302,8 @@ def make_res_layer(block,
             with_cp=with_cp,
             conv_cfg=conv_cfg,
             norm_cfg=norm_cfg,
-            dcn=dcn))
+            dcn=dcn,
+            ct=ct))
     inplanes = planes * block.expansion
     for i in range(1, blocks):
         layers.append(
@@ -284,8 +315,9 @@ def make_res_layer(block,
                 style=style,
                 with_cp=with_cp,
                 conv_cfg=conv_cfg,
-                norm_cfg=norm_cfg,
-                dcn=dcn))
+                norm_cfg=   norm_cfg,
+                dcn=dcn,
+                ct=ct))
 
     return nn.Sequential(*layers)
 
@@ -336,6 +368,8 @@ class ResNet(nn.Module):
                  norm_eval=True,
                  dcn=None,
                  stage_with_dcn=(False, False, False, False),
+                 ct=None,
+                 stage_with_ct=(False, False, False, False),
                  with_cp=False,
                  zero_init_residual=True):
         super(ResNet, self).__init__()
@@ -359,6 +393,10 @@ class ResNet(nn.Module):
         self.stage_with_dcn = stage_with_dcn
         if dcn is not None:
             assert len(stage_with_dcn) == num_stages
+        self.ct = ct
+        self.stage_with_ct = stage_with_ct
+        if ct is not None:
+            assert len(stage_with_ct) == num_stages    
         self.zero_init_residual = zero_init_residual
         self.block, stage_blocks = self.arch_settings[depth]
         self.stage_blocks = stage_blocks[:num_stages]
@@ -371,6 +409,7 @@ class ResNet(nn.Module):
             stride = strides[i]
             dilation = dilations[i]
             dcn = self.dcn if self.stage_with_dcn[i] else None
+            ct = self.ct if self.stage_with_ct[i] else None
             planes = 64 * 2**i
             res_layer = make_res_layer(
                 self.block,
@@ -383,7 +422,8 @@ class ResNet(nn.Module):
                 with_cp=with_cp,
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg,
-                dcn=dcn)
+                dcn=dcn,
+                ct=ct)
             self.inplanes = planes * self.block.expansion
             layer_name = 'layer{}'.format(i + 1)
             self.add_module(layer_name, res_layer)
