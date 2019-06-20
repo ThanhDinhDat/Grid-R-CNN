@@ -5,9 +5,28 @@ import mmcv
 import numpy as np
 import torch.nn as nn
 import pycocotools.mask as maskUtils
-
+import cv2
 from mmdet.core import tensor2imgs, get_classes
 
+def visualize(img, bboxes, labels, class_names, score_thr):
+    name = 'show_window'
+    for i, bbox in enumerate(bboxes):
+        txt=class_names[labels[i]]
+        if bbox[-1]<=score_thr or txt != 'person':
+            continue
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        color = (0, 0, 225)
+        cat_size = cv2.getTextSize(txt, font, 0.5, 2)[0]
+        cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+        cv2.rectangle(img,
+                    (int(bbox[0]), int(bbox[1]) - int(cat_size[1]) - 2),
+                    (int(bbox[0]) + int(cat_size[0]), int(bbox[1]) - 2), color, -1)
+        cv2.putText(img, txt, (int(bbox[0]), int(bbox[1]) - 2), 
+                    font, 0.5, (0, 0, 0), thickness=1, lineType=cv2.LINE_AA)
+    cv2.imshow('name', img)
+    if cv2.waitKey(1000) == 27:
+        import sys
+        sys.exit(0)
 
 class BaseDetector(nn.Module):
     """Base class for detectors"""
@@ -132,9 +151,15 @@ class BaseDetector(nn.Module):
                 for i, bbox in enumerate(bbox_result)
             ]
             labels = np.concatenate(labels)
-            mmcv.imshow_det_bboxes(
-                img_show,
-                bboxes,
-                labels,
+            visualize(
+                img=img_show,
+                bboxes=bboxes,
+                labels=labels,
                 class_names=class_names,
                 score_thr=score_thr)
+            # mmcv.imshow_det_bboxes(
+            #     img_show,
+            #     bboxes,
+            #     labels,
+            #     class_names=class_names,
+            #     score_thr=score_thr)
